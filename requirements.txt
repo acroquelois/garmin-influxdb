@@ -1,2 +1,4 @@
 garminconnect
-influxdb
+influxdb-client
+gpxpy
+lxml
