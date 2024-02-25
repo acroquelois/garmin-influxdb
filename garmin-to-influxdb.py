@@ -22,6 +22,8 @@ import logging
 
 import gpxpy
 import gpxpy.gpx
+from math import radians, cos, sin, asin, sqrt
+
 
 logging.basicConfig(level=logging.DEBUG)
 start_date = date(2023,9,1)
@@ -44,33 +46,6 @@ influx_token = ""
 influx_db = "sport-monitoring"
 influxdb_time_format = "%Y-%m-%dT%H:%M:%SZ"
 gather_hrv_data = False
-
-def get_data_from_garmin(component, command, client=None):
-    """
-    This method attempts to get data from Garmin. In order to be dynamically called, methods available on the
-    Garmin client are passed in as strings. Therefore you need to run the eval() command in order to actually
-    execute the client methods.
-
-    :param component: This is the heading to retrieve i.e. total step count
-    :param command: Method on Garmin object to be called. I.E.: client.get_steps_data
-    :param client: this is the Garmin client object
-    :return: returns the results from the Garmin server
-    """
-    try:
-        result = eval(command)
-    except (
-        GarminConnectConnectionError,
-        GarminConnectAuthenticationError,
-        GarminConnectTooManyRequestsError,
-    ) as err:
-        print(f"Error occurred during Garmin Connect Client get {component}: {err}")
-        quit()
-    except Exception as e:  # pylint: disable=broad-except
-        print(e)
-        print(f"Unknown error occurred during Garmin Connect Client get {component}")
-        quit()
-    return result
-
 
 def connect_to_garmin(username, password):
     """
@@ -102,58 +77,7 @@ def connect_to_garmin(username, password):
     get_data_from_garmin("login", login_command, client=client)
     return client
 
-
-def download_all_activity(client, activities):
-    """
-    Download an Activity
-    """
-    try:
-        for activity in activities:
-            activity_id = activity["activityId"]
-            print("client.download_activities(%s)", activity_id)
-            print("----------------------------------------------------------------------------------------")
-
-            gpx_data = client.download_activity(activity_id, dl_fmt=client.ActivityDownloadFormat.GPX)
-            output_file = f"./{str(activity_id)}.gpx"
-            with open(output_file, "wb") as fb:
-                fb.write(gpx_data)
-
-            tcx_data = client.download_activity(activity_id, dl_fmt=client.ActivityDownloadFormat.TCX)
-            output_file = f"./{str(activity_id)}.tcx"
-            with open(output_file, "wb") as fb:
-                fb.write(tcx_data)
-
-            zip_data = client.download_activity(activity_id, dl_fmt=client.ActivityDownloadFormat.ORIGINAL)
-            output_file = f"./{str(activity_id)}.zip"
-            with open(output_file, "wb") as fb:
-                fb.write(zip_data)
-
-            csv_data = client.download_activity(activity_id, dl_fmt=client.ActivityDownloadFormat.CSV)
-            output_file = f"./{str(activity_id)}.csv"
-            with open(output_file, "wb") as fb:
-              fb.write(csv_data)
-    except (
-        GarminConnectConnectionError,
-        GarminConnectAuthenticationError,
-        GarminConnectTooManyRequestsError,
-    ) as err:
-        print(f"Error occurred during Garmin Connect Client get activity data: {err}")
-        quit()
-    except Exception:  # pylint: disable=broad-except
-        print("Unknown error occurred during Garmin Connect Client get activity data")
-        quit()
-
-
 def create_json_body(measurement, measurement_value, datestamp, tags=None):
-    """
-    This creates the json body that will be used to create measurements in InfluxDB
-
-    :param measurement: The name of the measurement to be created
-    :param measurement_value: the numerical value of the measurement
-    :param datestamp: datestamp in the following format: 2020-10-20T00:00:00Z
-    :param tags: any tags to be assiated with the measurement. Expects a dict
-    :return: json object
-    """
     return [
         {
             "measurement": measurement,
@@ -165,100 +89,82 @@ def create_json_body(measurement, measurement_value, datestamp, tags=None):
         }
     ]
 
-
-def create_influxdb_daily_measurement(user_data, influxdb_client_init):
-    """
-    Creates a measurement based on once-a-day values in Garmin such as total steps
-
-    :param user_data: A dict with information pulled down from garmin
-    :param influxdb_client_init: the client connection object to the InfluxDB
-    :return: Nothing. Simply writes to the DB
-    """
-    for heading, value in user_data.items():
-        print("Adding %s\nValue: %s" % (heading, value))
-        if (value is None) or (heading is None):
-            print("Unknown whether value should be an INT or a FLOAT. Manually intervention "
-                  "for this day is required")
-        else:
-            if "minutes" in heading.lower():
-                value = value / 60
-            print(user_data['current_date'])
-            with influxdb_client_init as influx:
-                write_api = influx.write_api(write_options=SYNCHRONOUS)
-                loaded = create_json_body(heading, value, user_data['current_date'])
-                write_api.write(bucket=influx_bucket, record=loaded)
-
-
-def create_influxdb_multi_measurement(user_data, subset_list_of_stats, start_time_heading, date_format,
-                                      timestamp_offset=False):
-    """
-    This method is for handling objects that have potential for multiple readings per day
-    Such as multiple activities
-
-    :param user_data: A dict with information pulled down from garmin
-    :param influxdb_client_init: the client connection object to the InfluxDB
-    :param subset_list_of_stats: A lot of objects from Garmin have far too much information.
-    This is a dict of a small subset
-    :param start_time_heading: The datestamp for the start of an event. Acts as a unique ID
-    :param date_format: Date objects from Garmin come in different forms. This object is expected to be
-    the correct format for the type of object being handled
-    :param timestamp_offset: For some reason, some date objects are too far behind. If an offset is needed, toggle this
-    :return: Nothing. Simply writes to the DB
-    """
-    temp_dict = {}
-    date_format = date_format
-    for entry in user_data:
-        activity_start = entry[start_time_heading]
-        if timestamp_offset:
-            timestamp = time.mktime(time.strptime(activity_start, date_format)) + 14400
-        else:
-            timestamp = time.mktime(time.strptime(activity_start, date_format))
-        current_date = time.strftime(influxdb_time_format, time.localtime(round(timestamp)))
-        for heading in subset_list_of_stats:
-            try:
-                temp_dict[current_date].update({heading: entry[heading]})
-            except KeyError:
-                temp_dict[current_date] = {heading: entry[heading]}
-    for heading, inner_dict in temp_dict.items():
-        for inner_heading, value in inner_dict.items():
-            print("Valeur: %s" % (value))
-            print("isNone: %s" % (value == None))
-            if (value is None) or (inner_heading is None):
-                print("Unknown whether value should be an INT or a FLOAT. Manually intervention "
-                      "for this day is required")
-            else:
-                if "speed" in inner_heading.lower():
-                    value = value * speed_multiplier
-
-                with influxdb_client.InfluxDBClient(url=influx_server, token=influx_token, org=influx_org) as influx:
-                    write_api = influx.write_api(write_options=SYNCHRONOUS)
-                    print("Adding: %s\nValue: %s" % (inner_heading, value))
-                    loaded = create_json_body(inner_heading, value, heading)
-                    print("loaded %s" % (loaded))
-                    write_api.write(bucket=influx_bucket, record=loaded)
-    print("")
-
+# with influxdb_client.InfluxDBClient(url=influx_server, token=influx_token, org=influx_org) as influx:
+#                     write_api = influx.write_api(write_options=SYNCHRONOUS)
+#                     print("Adding: %s\nValue: %s" % (inner_heading, value))
+#                     loaded = create_json_body(inner_heading, value, heading)
+#                     print("loaded %s" % (loaded))
+#                     write_api.write(bucket=influx_bucket, record=loaded)
+def calc_distance(lat1, lat2, lon1, lon2):
+    lon1 = radians(lon1)
+    lon2 = radians(lon2)
+    lat1 = radians(lat1)
+    lat2 = radians(lat2)
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+    c = 2 * asin(sqrt(a))
+    r = 6371
+    return(c * r)
 
 gpx_file = open('test.gpx', 'r')
 
 gpx = gpxpy.parse(gpx_file)
+
+lat1 = None
+lat2 = None
+lon1 = None
+lon2 = None
+
+time1 = None
+time2 = None
+
+total_distance = 0
+total_time = timedelta(0)
+
 for track in gpx.tracks:
-    print('Name: {0} \n type: {1}'.format(track.name, track.type))
     for segment in track.segments:
         for point in segment.points:
+            ## Caclulate distance
+            lat1 = lat2
+            lon1 = lon2
+            lat2 = point.latitude
+            lon2 = point.longitude
+            distance = 0
+            if(lat1 or lon1):
+                distance = calc_distance(lat1, lat2, lon1, lon2)
+
+            ## Caclulate elapsed time
+            time1 = time2
+            time2 = point.time
+            elapsed_time = timedelta(0)
+            if(time1):
+                elapsed_time = time2 - time1
+
+            speed = 0
+            pace = 0
+            if(elapsed_time):
+                speed = distance / (elapsed_time.total_seconds() / 3600)
+                pace = 60 / speed
             base_data = {
                     'timestamp': point.time,
                     'latitude': point.latitude,
                     'longitude': point.longitude,
                     'elevation': point.elevation,
+                    'distance': distance,
+                    'elapsed_time': elapsed_time,
+                    'total_time': total_time.total_seconds() / 60,
+                    'speed': speed,
+                    'pace': pace
             }
+            total_distance += base_data['distance']
+            total_time += base_data['elapsed_time']
             for k, v in point.extensions:
                 base_data['heart_rate'] = k.text
                 base_data['cadence'] = v.text
-                print('k: {0} :::: v{1}'.format(k.text, v))
-            print('Point at ({0},{1}) -> {2} :: {3}'.format(point.latitude, point.longitude, point.elevation, point.time))
             print(base_data)
 
+print('distance: {0} | time: {1}'.format(total_distance, total_time))
 for waypoint in gpx.waypoints:
     print('waypoint {0} -> ({1},{2})'.format(waypoint.name, waypoint.latitude, waypoint.longitude))
 
