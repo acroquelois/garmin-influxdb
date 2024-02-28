@@ -32,7 +32,7 @@ today = date.today()
 # to the speed reporting in the app. For example a speed of 1.61199998 * multiplyer = 5.77804 km/hr
 speed_multiplier = 3.584392177
 garmin_username = 'croquelois.adrien@gmail.com'
-garmin_password = 'xF7pgrAj3qAt93'
+garmin_password = ''
 
 garmin_date_format = "%Y-%m-%d"
 influx_server = "192.168.1.62:8086"
